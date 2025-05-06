@@ -1,0 +1,13 @@
+{
+    "mac_addresses": ["0C:15:63:DF:61:2F"],
+    "scan_interval": 7,
+    "absence_interval": 15,
+    "relay_close_time": 0.5,
+    "presence_beep_duration": 0.1,
+    "presence_beep_count": 2,
+    "absence_beep_duration": 0.1,
+    "absence_beep_count": 2,
+    "button_bounce_time": 0.2,
+    "presence_led_blink_interval": 0.7,
+    "absence_led_blink_interval": 1.2
+}
