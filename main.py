@@ -3,6 +3,8 @@ import threading
 import time
 from gpiozero import Button, LED, OutputDevice
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import atexit
 
 BUTTONPIN = 5
 LEDPIN = 23
@@ -27,6 +29,11 @@ absenceledblinkinterval = 1.2
 
 devicepresent = False
 device_states = {mac: False for mac in macaddresses}
+bluetooth_timeout = 5
+
+# Shared ThreadPool für Parallelscans
+executor = ThreadPoolExecutor(max_workers=max(1, len(macaddresses)))
+atexit.register(lambda: executor.shutdown(wait=False))
 
 app = Flask(__name__)
 
@@ -41,7 +48,7 @@ def check_device_name(macaddress):
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
                                 text=True,
-                                timeout=scaninterval)
+                                timeout=bluetooth_timeout)
         devicename = result.stdout.strip()
         return bool(devicename)
     except subprocess.TimeoutExpired:
@@ -83,9 +90,15 @@ def main_thread():
         now = time.time()
         found_any = False
 
-        # Scan aller MAC-Adressen
-        for mac in macaddresses:
-            active = check_device_name(mac)
+        futures = {executor.submit(check_device_name, mac): mac for mac in macaddresses}
+
+        for future in as_completed(futures):
+            mac = futures[future]
+            try:
+                active = future.result()
+            except Exception:
+                active = False
+
             device_states[mac] = active
             if active:
                 lastseen[mac] = now
