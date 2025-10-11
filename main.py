@@ -67,33 +67,52 @@ state_lock = threading.Lock()
 device_states = {mac: False for mac in macaddresses}
 last_seen = {mac: 0.0 for mac in macaddresses}
 devicepresent = False
+active_probes = set()
+active_probes_lock = threading.Lock()
+last_cycle_timestamp = 0.0
+watchdog_timeout = scaninterval + bluetooth_probe_timeout * len(macaddresses) + 5
 
 # --------------------------------------------------------------------------- #
 # Hilfsfunktionen
 # --------------------------------------------------------------------------- #
 def probe_device(mac: str) -> bool:
     """Liefert True, wenn das Gerät per klassischem Bluetooth erreichbar ist."""
-    cmd = ["timeout", str(bluetooth_probe_timeout), "hcitool", "name", mac]
+    process = None
+    start_time = time.time()
     try:
-        res = subprocess.run(
-            cmd,
+        process = subprocess.Popen(
+            ["hcitool", "name", mac],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            check=False,
+            start_new_session=True,
         )
-        if res.returncode == 124:
-            logging.debug("hcitool Timeout für %s", mac)
-            return False
-        if res.stderr:
-            logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
-        return bool(res.stdout.strip())
+        with active_probes_lock:
+            active_probes.add(process)
+        stdout, _ = process.communicate(timeout=bluetooth_probe_timeout)
+        return bool(stdout.strip())
+    except subprocess.TimeoutExpired:
+        logging.warning("hcitool Timeout für %s – Prozess wird beendet.", mac)
+        if process:
+            process.kill()
+            try:
+                process.communicate(timeout=1)
+            except Exception:
+                pass
+        return False
     except FileNotFoundError:
-        logging.error("Befehl '%s' nicht gefunden. Prüfe, ob coreutils/bluez installiert ist.", cmd[0])
+        logging.error("hcitool nicht gefunden. Installiere bluez (sudo apt install bluez).")
         return False
     except Exception as exc:  # pragma: no cover
         logging.error("Fehler bei hcitool name %s: %s", mac, exc)
         return False
+    finally:
+        duration = time.time() - start_time
+        if duration > bluetooth_probe_timeout + 1:
+            logging.warning("Lange Abfragezeit für %s: %.2fs", mac, duration)
+        if process:
+            with active_probes_lock:
+                active_probes.discard(process)
 
 
 def beep(times: int, duration: float) -> None:
@@ -102,6 +121,40 @@ def beep(times: int, duration: float) -> None:
         time.sleep(duration)
         buzzer.off()
         time.sleep(duration)
+
+
+def kill_active_probes() -> None:
+    with active_probes_lock:
+        processes = list(active_probes)
+
+    for process in processes:
+        if process.poll() is None:
+            logging.warning("Beende hängenden hcitool-Prozess (PID %s).", process.pid)
+            try:
+                process.kill()
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                logging.error("Prozess PID %s reagiert nicht auf kill().", process.pid)
+            except Exception as exc:  # pragma: no cover
+                logging.error("Fehler beim Beenden von PID %s: %s", process.pid, exc)
+
+
+def watchdog_loop() -> None:
+    while True:
+        time.sleep(scaninterval)
+        with state_lock:
+            last_cycle = last_cycle_timestamp
+
+        if last_cycle == 0.0:
+            continue
+
+        gap = time.time() - last_cycle
+        if gap > watchdog_timeout:
+            logging.error(
+                "Watchdog: Kein erfolgreicher Präsenz-Zyklus seit %.1fs. Starte Bereinigung.",
+                gap,
+            )
+            kill_active_probes()
 
 
 def button_pressed() -> None:
@@ -132,8 +185,10 @@ def blink_led() -> None:
 
 def presence_monitor() -> None:
     """Hauptschleife zur Erkennung von Presence/Absence."""
-    global devicepresent
+    global devicepresent, last_cycle_timestamp
     previous_state = None
+    with state_lock:
+        last_cycle_timestamp = time.time()
 
     while True:
         try:
@@ -164,10 +219,12 @@ def presence_monitor() -> None:
                     logging.info("Statuswechsel → Presence")
                 else:
                     beep(absencebeepcount, absencebeepduration)
-                    logging.info("Statuswechsel → Absence")
+                logging.info("Statuswechsel → Absence")
                 previous_state = current_state
 
             elapsed = time.time() - cycle_start
+            with state_lock:
+                last_cycle_timestamp = time.time()
             time.sleep(max(0.0, scaninterval - elapsed))
         except Exception as exc:  # pragma: no cover
             logging.exception("Presence-Monitor Fehler: %s", exc)
@@ -204,6 +261,7 @@ button.when_pressed = button_pressed
 def start_threads() -> None:
     threading.Thread(target=presence_monitor, daemon=True).start()
     threading.Thread(target=blink_led, daemon=True).start()
+    threading.Thread(target=watchdog_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
