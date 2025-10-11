@@ -40,9 +40,13 @@ def check_device_name(macaddress):
         result = subprocess.run(["hcitool", "name", macaddress],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE,
-                                text=True)
+                                text=True,
+                                timeout=scaninterval)
         devicename = result.stdout.strip()
         return bool(devicename)
+    except subprocess.TimeoutExpired:
+        # hcitool kann bei unerreichbaren Geräten hängen bleiben; Timeout verhindert Blockade
+        return False
     except Exception:
         return False
 
