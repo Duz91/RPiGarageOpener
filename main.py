@@ -5,6 +5,8 @@ from gpiozero import Button, LED, OutputDevice
 import subprocess
 import logging
 from contextlib import suppress
+import atexit
+import re
 
 BUTTONPIN = 5
 LEDPIN = 23
@@ -30,7 +32,8 @@ absenceledblinkinterval = 1.2
 devicepresent = False
 device_states = {mac: False for mac in macaddresses}
 bluetooth_probe_timeout = 5
-bluetooth_scan_duration = 6
+state_lock = threading.Lock()
+device_last_seen = {mac: 0 for mac in macaddresses}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,46 +72,110 @@ def probe_with_hcitool(macaddress):
         return False
 
 
-def scan_with_bluetoothctl(timeout):
-    """Führt einen kurzen Scan mit bluetoothctl aus und liefert gefundene MACs."""
-    cmd = ["bluetoothctl", "--timeout", str(timeout), "scan", "on"]
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False
-        )
-        found = set()
-        for line in result.stdout.splitlines():
-            lower_line = line.lower()
-            for mac in macaddresses:
-                if mac.lower() in lower_line:
-                    found.add(mac)
-        if result.stderr:
-            logging.debug("bluetoothctl stderr: %s", result.stderr.strip())
-        return found
-    except FileNotFoundError:
-        logging.warning("bluetoothctl nicht verfügbar – wechsle auf hcitool-Fallback.")
+class BluetoothScanner(threading.Thread):
+    """Beobachtet bluetoothctl-Ausgaben und merkt sich zuletzt gesehene Zielgeräte."""
+
+    def __init__(self, targets, lock, last_seen):
+        super().__init__(daemon=True)
+        self.targets = {mac.lower(): mac for mac in targets}
+        self.lock = lock
+        self.last_seen = last_seen
+        self.running = threading.Event()
+        self.running.set()
+        self.process = None
+
+    def run(self):
+        while self.running.is_set():
+            try:
+                self._start_process()
+                self._send_command("power on")
+                self._send_command("scan on")
+                logging.info("bluetoothctl Scanner gestartet.")
+                while self.running.is_set():
+                    line = self.process.stdout.readline()
+                    if not line:
+                        break
+                    mac = self._extract_target_mac(line)
+                    if mac:
+                        with self.lock:
+                            self.last_seen[mac] = time.time()
+                if self.running.is_set():
+                    logging.warning("bluetoothctl Scanner unerwartet beendet – versuche Neustart.")
+            except FileNotFoundError:
+                logging.warning("bluetoothctl nicht gefunden – Scanner deaktiviert.")
+                return
+            except Exception as exc:
+                logging.error("Fehler im bluetoothctl Scanner: %s", exc)
+            finally:
+                self._stop_process()
+                if self.running.is_set():
+                    time.sleep(2)
+
+    def stop(self):
+        self.running.clear()
+        self._stop_process()
+
+    def _start_process(self):
+        # stdbuf sorgt für zeilenweises Flushen, damit readline() zeitnah Daten bekommt
+        try:
+            self.process = subprocess.Popen(
+                ["stdbuf", "-oL", "bluetoothctl"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+        except FileNotFoundError:
+            # stdbuf nicht verfügbar → ohne starten
+            self.process = subprocess.Popen(
+                ["bluetoothctl"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+
+    def _send_command(self, command):
+        if self.process and self.process.stdin:
+            try:
+                self.process.stdin.write(command + "\n")
+                self.process.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    def _extract_target_mac(self, line):
+        lower_line = line.lower()
+        for lower_mac, original_mac in self.targets.items():
+            if lower_mac in lower_line:
+                logging.debug("bluetoothctl Meldung für %s: %s", original_mac, line.strip())
+                return original_mac
+
+        match = re.search(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", lower_line)
+        if match:
+            candidate = match.group(1).upper()
+            return self.targets.get(candidate.lower())
         return None
-    except Exception as exc:
-        logging.error("bluetoothctl Scan fehlgeschlagen: %s", exc)
-        return None
+
+    def _stop_process(self):
+        if self.process:
+            try:
+                self._send_command("scan off")
+                self._send_command("quit")
+            except Exception:
+                pass
+            with suppress(Exception):
+                self.process.terminate()
+            with suppress(Exception):
+                self.process.wait(timeout=2)
+            if self.process.poll() is None:
+                with suppress(Exception):
+                    self.process.kill()
+            self.process = None
 
 
-def scan_for_devices():
-    """Ermittelt alle aktuell sichtbaren Ziel-MAC-Adressen."""
-    found = scan_with_bluetoothctl(bluetooth_scan_duration)
-    if found is not None:
-        return found
+bluetooth_scanner = BluetoothScanner(macaddresses, state_lock, device_last_seen)
+atexit.register(bluetooth_scanner.stop)
 
-    # Fallback: einzelne hcitool-Abfragen
-    found = set()
-    for mac in macaddresses:
-        if probe_with_hcitool(mac):
-            found.add(mac)
-    return found
 
 def beep(times, duration):
     for _ in range(times):
@@ -139,33 +206,39 @@ def blink_led():
 
 def main_thread():
     global devicepresent
-    lastseen = {}
     previousstate = None
 
     while True:
         cycle_start = time.time()
-        logging.info("Starte Bluetooth-Scan …")
-        found_devices = scan_for_devices()
+        logging.info("Starte Präsenz-Zyklus …")
+        found_devices = set()
         now = time.time()
-        logging.info("Scan abgeschlossen: %s", ", ".join(found_devices) or "nichts gefunden")
 
+        # Ergebnisse aus dem Scanner übernehmen
+        with state_lock:
+            for mac in macaddresses:
+                last_time = device_last_seen.get(mac, 0)
+                if now - last_time <= absenceinterval:
+                    found_devices.add(mac)
+
+        # Für fehlende Geräte aktiv mit hcitool nachfragen
         for mac in macaddresses:
             if mac in found_devices:
-                device_states[mac] = True
-                lastseen[mac] = now
-            else:
-                # Als abwesend markieren, wenn älter als absenceinterval
-                last_time = lastseen.get(mac, 0)
-                if now - last_time > absenceinterval:
-                    device_states[mac] = False
+                continue
+            if probe_with_hcitool(mac):
+                with state_lock:
+                    device_last_seen[mac] = time.time()
+                found_devices.add(mac)
+                logging.info("Direkte Abfrage erfolgreich für %s", mac)
 
-        # Alte Einträge entfernen
-        for mac, lasttime in list(lastseen.items()):
-            if now - lasttime > absenceinterval:
-                del lastseen[mac]
-                device_states[mac] = False
+        # Gerätestatus aktualisieren
+        for mac in macaddresses:
+            device_states[mac] = mac in found_devices
+            logging.debug("Status %s: %s", mac, "anwesend" if device_states[mac] else "abwesend")
 
-        devicepresent = len(lastseen) > 0
+        logging.info("Zyklus abgeschlossen: %s", ", ".join(found_devices) or "nichts gefunden")
+
+        devicepresent = bool(found_devices)
 
         # Statuswechsel → akustisches Signal
         if devicepresent and previousstate != "present":
@@ -179,7 +252,7 @@ def main_thread():
 
         elapsed = time.time() - cycle_start
         sleep_time = max(0, scaninterval - elapsed)
-        if sleep_time:
+        if sleep_time > 0:
             time.sleep(sleep_time)
 
 button.when_pressed = button_pressed
@@ -201,6 +274,10 @@ def activaterelay():
     return "Relay activated!"
 
 def start_threads():
+    try:
+        bluetooth_scanner.start()
+    except RuntimeError:
+        logging.warning("bluetoothctl Scanner konnte nicht gestartet werden (läuft bereits?).")
     threading.Thread(target=main_thread, daemon=True).start()
     threading.Thread(target=blink_led, daemon=True).start()
 
