@@ -1,21 +1,19 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, jsonify
 import threading
 import time
 from gpiozero import Button, LED, OutputDevice
 import subprocess
-import json
 
-SETTINGSFILE = "settings.json"
 BUTTONPIN = 5
 LEDPIN = 23
 RELAYPIN = 26
 BUZZERPIN = 19
 
 macaddresses = [
-    # Hier MAC-Adressen direkt eintragen, Beispiel:
     "0C:15:63:DF:61:2F",
     "80:04:5F:A2:66:57"
 ]
+
 scaninterval = 7
 absenceinterval = 15
 relayclosetime = 0.5
@@ -28,6 +26,8 @@ presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
 
 devicepresent = False
+device_states = {mac: False for mac in macaddresses}
+
 app = Flask(__name__)
 
 led = LED(LEDPIN)
@@ -37,7 +37,10 @@ button = Button(BUTTONPIN, pull_up=True, bounce_time=buttonbouncetime)
 
 def check_device_name(macaddress):
     try:
-        result = subprocess.run(["hcitool", "name", macaddress], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(["hcitool", "name", macaddress],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                text=True)
         devicename = result.stdout.strip()
         return bool(devicename)
     except Exception:
@@ -51,7 +54,6 @@ def beep(times, duration):
         time.sleep(duration)
 
 def button_pressed():
-    global devicepresent
     if devicepresent:
         relay.on()
         time.sleep(relayclosetime)
@@ -61,39 +63,58 @@ def blink_led():
     global devicepresent
     while True:
         if devicepresent:
-            led.blink(on_time=presenceledblinkinterval, off_time=presenceledblinkinterval)
+            led.blink(on_time=presenceledblinkinterval,
+                      off_time=presenceledblinkinterval)
         else:
-            led.blink(on_time=absenceledblinkinterval, off_time=absenceledblinkinterval)
+            led.blink(on_time=absenceledblinkinterval,
+                      off_time=absenceledblinkinterval)
         time.sleep(scaninterval)
 
 def main_thread():
     global devicepresent
     lastseen = {}
     previousstate = None
+
     while True:
-        current_time = time.time()
+        now = time.time()
+        found_any = False
+
+        # Scan aller MAC-Adressen
         for mac in macaddresses:
-            if check_device_name(mac):
-                lastseen[mac] = current_time
-        any_present = False
-        for mac in macaddresses:
-            if mac in lastseen and (current_time - lastseen[mac]) <= absenceinterval:
-                any_present = True
-                break
-        devicepresent = any_present
+            active = check_device_name(mac)
+            device_states[mac] = active
+            if active:
+                lastseen[mac] = now
+                found_any = True
+
+        # Alte Einträge entfernen
+        for mac, lasttime in list(lastseen.items()):
+            if now - lasttime > absenceinterval:
+                del lastseen[mac]
+                device_states[mac] = False
+
+        devicepresent = len(lastseen) > 0 or found_any
+
+        # Statuswechsel → akustisches Signal
         if devicepresent and previousstate != "present":
             beep(presencebeepcount, presencebeepduration)
             previousstate = "present"
         elif not devicepresent and previousstate != "absent":
             beep(absencebeepcount, absencebeepduration)
             previousstate = "absent"
+
         time.sleep(scaninterval)
 
 button.when_pressed = button_pressed
 
 @app.route("/")
 def index():
-    return render_template("index-clean.html")
+    return render_template("index.html", macaddresses=macaddresses)
+
+@app.route("/status")
+def status():
+    """Gibt den aktuellen Status als JSON zurück"""
+    return jsonify(device_states)
 
 @app.route("/activaterelay")
 def activaterelay():
