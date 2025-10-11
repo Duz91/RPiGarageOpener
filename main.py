@@ -32,11 +32,7 @@ LEDPIN = 23
 RELAYPIN = 26
 BUZZERPIN = 19
 
-macaddresses = [
-    "0C:15:63:DF:61:2F",
-    "80:04:5F:A2:66:57"
-]
-
+macaddresses = ["0C:15:63:DF:61:2F"]
 scaninterval = 7
 absenceinterval = 15
 relayclosetime = 0.5
