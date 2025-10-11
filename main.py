@@ -3,7 +3,6 @@ import logging
 import subprocess
 import threading
 import time
-from contextlib import suppress
 
 try:
     from gpiozero import Button, LED, OutputDevice
@@ -74,23 +73,23 @@ devicepresent = False
 # --------------------------------------------------------------------------- #
 def probe_device(mac: str) -> bool:
     """Liefert True, wenn das Gerät per klassischem Bluetooth erreichbar ist."""
+    cmd = ["timeout", str(bluetooth_probe_timeout), "hcitool", "name", mac]
     try:
-        process = subprocess.Popen(
-            ["hcitool", "name", mac],
+        res = subprocess.run(
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            check=False,
         )
-        stdout, _ = process.communicate(timeout=bluetooth_probe_timeout)
-        return bool(stdout.strip())
-    except subprocess.TimeoutExpired:
-        logging.warning("hcitool Timeout für %s – Prozess wird beendet.", mac)
-        process.kill()
-        with suppress(Exception):
-            process.communicate()
-        return False
+        if res.returncode == 124:
+            logging.debug("hcitool Timeout für %s", mac)
+            return False
+        if res.stderr:
+            logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
+        return bool(res.stdout.strip())
     except FileNotFoundError:
-        logging.error("hcitool nicht gefunden. Installiere bluez (sudo apt install bluez).")
+        logging.error("Befehl '%s' nicht gefunden. Prüfe, ob coreutils/bluez installiert ist.", cmd[0])
         return False
     except Exception as exc:  # pragma: no cover
         logging.error("Fehler bei hcitool name %s: %s", mac, exc)
@@ -117,14 +116,18 @@ def button_pressed() -> None:
 
 def blink_led() -> None:
     while True:
-        with state_lock:
-            present = devicepresent
+        try:
+            with state_lock:
+                present = devicepresent
 
-        interval = presenceledblinkinterval if present else absenceledblinkinterval
-        led.on()
-        time.sleep(0.2)
-        led.off()
-        time.sleep(interval)
+            interval = presenceledblinkinterval if present else absenceledblinkinterval
+            led.on()
+            time.sleep(0.2)
+            led.off()
+            time.sleep(interval)
+        except Exception as exc:  # pragma: no cover
+            logging.exception("LED-Thread Fehler: %s", exc)
+            time.sleep(1)
 
 
 def presence_monitor() -> None:
@@ -133,38 +136,42 @@ def presence_monitor() -> None:
     previous_state = None
 
     while True:
-        cycle_start = time.time()
-        now = cycle_start
-        detected = []
+        try:
+            cycle_start = time.time()
+            now = cycle_start
+            detected = []
 
-        for mac in macaddresses:
-            if probe_device(mac):
-                with state_lock:
-                    last_seen[mac] = now
-                detected.append(mac)
-
-        with state_lock:
             for mac in macaddresses:
-                device_states[mac] = (now - last_seen[mac]) <= absenceinterval
-            devicepresent = any(device_states.values())
-            current_state = "present" if devicepresent else "absent"
+                if probe_device(mac):
+                    with state_lock:
+                        last_seen[mac] = now
+                    detected.append(mac)
 
-        logging.info(
-            "Scan abgeschlossen → anwesend: %s",
-            ", ".join(detected) if detected else "keine Geräte",
-        )
+            with state_lock:
+                for mac in macaddresses:
+                    device_states[mac] = (now - last_seen[mac]) <= absenceinterval
+                devicepresent = any(device_states.values())
+                current_state = "present" if devicepresent else "absent"
 
-        if current_state != previous_state:
-            if current_state == "present":
-                beep(presencebeepcount, presencebeepduration)
-                logging.info("Statuswechsel → Presence")
-            else:
-                beep(absencebeepcount, absencebeepduration)
-                logging.info("Statuswechsel → Absence")
-            previous_state = current_state
+            logging.info(
+                "Scan abgeschlossen → anwesend: %s",
+                ", ".join(detected) if detected else "keine Geräte",
+            )
 
-        elapsed = time.time() - cycle_start
-        time.sleep(max(0.0, scaninterval - elapsed))
+            if current_state != previous_state:
+                if current_state == "present":
+                    beep(presencebeepcount, presencebeepduration)
+                    logging.info("Statuswechsel → Presence")
+                else:
+                    beep(absencebeepcount, absencebeepduration)
+                    logging.info("Statuswechsel → Absence")
+                previous_state = current_state
+
+            elapsed = time.time() - cycle_start
+            time.sleep(max(0.0, scaninterval - elapsed))
+        except Exception as exc:  # pragma: no cover
+            logging.exception("Presence-Monitor Fehler: %s", exc)
+            time.sleep(2)
 
 # --------------------------------------------------------------------------- #
 # Flask-Routen
