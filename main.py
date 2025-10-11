@@ -71,20 +71,22 @@ def main_thread():
     lastseen = {}
     previousstate = None
     while True:
-        devicepresent = False
+        current_time = time.time()
         for mac in macaddresses:
             if check_device_name(mac):
-                lastseen[mac] = time.time()
-                devicepresent = True
+                lastseen[mac] = current_time
+        any_present = False
+        for mac in macaddresses:
+            if mac in lastseen and (current_time - lastseen[mac]) <= absenceinterval:
+                any_present = True
+                break
+        devicepresent = any_present
         if devicepresent and previousstate != "present":
             beep(presencebeepcount, presencebeepduration)
             previousstate = "present"
         elif not devicepresent and previousstate != "absent":
             beep(absencebeepcount, absencebeepduration)
             previousstate = "absent"
-        for addr in macaddresses:
-            if addr in lastseen and time.time() - lastseen[addr] > absenceinterval:
-                devicepresent = False
         time.sleep(scaninterval)
 
 button.when_pressed = button_pressed
