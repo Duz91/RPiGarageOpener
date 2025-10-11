@@ -15,7 +15,10 @@ RELAY_PIN = 26
 BUZZER_PIN = 19
 
 # Standardwerte für die Parameter
-mac_addresses = ["0C:15:63:DF:61:2F"]  # Beispiel-MAC-Adresse
+mac_addresses = [
+    "0C:15:63:DF:61:2F",
+    "80:04:5F:A2:66:57"
+]
 scan_interval = 7
 absence_interval = 15
 relay_close_time = 0.5
