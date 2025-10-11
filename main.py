@@ -18,6 +18,7 @@ macaddresses = [
     "80:04:5F:A2:66:57"
 ]
 
+
 scaninterval = 7
 absenceinterval = 15
 relayclosetime = 0.5
