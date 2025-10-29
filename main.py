@@ -54,7 +54,6 @@ active_probe_schedule = [
     (3.0, 2, 0.6),
 ]
 active_probe_cooldown = 15
-use_hcitool_fallback = True
 
 
 logging.basicConfig(
@@ -216,40 +215,19 @@ def active_probe(mac: str) -> bool:
     for stage, (timeout, attempts, pause) in enumerate(active_probe_schedule, start=1):
         for attempt in range(1, attempts + 1):
             logging.debug(
-                "Aktive Probe Stufe %d Versuch %d via bluetoothctl für %s (Timeout %.1fs)",
+                "Aktive Probe Stufe %d Versuch %d via hcitool name für %s (Timeout %.1fs)",
                 stage,
                 attempt,
                 mac,
                 timeout,
             )
-            res = _run_command(["timeout", str(timeout), "bluetoothctl", "info", mac])
+            res = _run_command(["hcitool", "name", mac], timeout=timeout)
             if res is not None:
                 if res.stderr:
-                    logging.debug("bluetoothctl stderr (%s): %s", mac, res.stderr.strip())
-                stdout = res.stdout.strip()
-                if stdout:
-                    preview = "; ".join(stdout.splitlines()[:3])
-                    logging.debug("bluetoothctl info (%s) → rc=%s, Daten=%s", mac, res.returncode, preview)
-                if res.returncode == 0 and ("Connected: yes" in stdout or "RSSI:" in stdout):
-                    logging.debug("Aktive Probe erfolgreich via bluetoothctl für %s", mac)
+                    logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
+                if res.stdout and res.returncode == 0:
+                    logging.debug("Aktive Probe erfolgreich via hcitool für %s: %s", mac, res.stdout.strip())
                     return True
-
-            if use_hcitool_fallback:
-                logging.debug(
-                    "Aktive Probe Stufe %d Versuch %d via hcitool name für %s (Timeout %.1fs)",
-                    stage,
-                    attempt,
-                    mac,
-                    timeout,
-                )
-                res = _run_command(["timeout", str(timeout), "hcitool", "name", mac])
-                if res is not None:
-                    if res.stderr:
-                        logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
-                    if res.stdout and res.returncode == 0:
-                        logging.debug("Aktive Probe erfolgreich via hcitool für %s: %s", mac, res.stdout.strip())
-                        return True
-
             if attempt < attempts:
                 time.sleep(pause)
         if stage < len(active_probe_schedule):
@@ -308,7 +286,8 @@ def presence_monitor() -> None:
                     "probe": "skipped",
                 }
 
-        for mac, info in status_info.items():
+        for mac in sorted(status_info, key=lambda m: status_info[m]["delta"], reverse=True):
+            info = status_info[mac]
             if info["present"]:
                 continue
             time_since_probe = (
