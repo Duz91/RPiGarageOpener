@@ -13,24 +13,27 @@
         table {
             margin: 0 auto;
             border-collapse: collapse;
-            width: 60%;
+            width: 80%;
         }
         th, td {
             border: 1px solid #ccc;
-            padding: 12px;
-            font-size: 1.1em;
+            padding: 10px 12px;
+            font-size: 1em;
         }
         th {
             background: #007bff;
             color: white;
         }
         .present {
-            color: green;
-            font-weight: bold;
+            color: #2e8b57;
+            font-weight: 600;
         }
         .absent {
-            color: red;
-            font-weight: bold;
+            color: #c62828;
+            font-weight: 600;
+        }
+        .probing {
+            background: #fff6d5;
         }
         .footer {
             margin-top: 30px;
@@ -49,23 +52,39 @@
         button:hover {
             background: #0056b3;
         }
+        .summary {
+            margin: 15px 0;
+            font-size: 1rem;
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <h1>Bluetooth-Geräte Überwachung</h1>
+    <div class="summary">
+        Aktives Gerät: <span id="activeDevice">–</span>
+    </div>
 
     <table id="deviceTable">
         <thead>
             <tr>
                 <th>MAC-Adresse</th>
                 <th>Status</th>
+                <th>Letztes Ergebnis</th>
+                <th>Fehlversuche</th>
+                <th>Seit letzter Erfolg</th>
+                <th>Wird geprüft</th>
             </tr>
         </thead>
         <tbody>
             {% for mac in macaddresses %}
-            <tr>
+            <tr id="row-{{ mac|replace(':', '') }}">
                 <td>{{ mac }}</td>
                 <td id="status-{{ mac|replace(':', '') }}">⏳ Überprüfe...</td>
+                <td id="result-{{ mac|replace(':', '') }}">–</td>
+                <td id="fails-{{ mac|replace(':', '') }}">0</td>
+                <td id="since-{{ mac|replace(':', '') }}">–</td>
+                <td id="probe-{{ mac|replace(':', '') }}">–</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -76,19 +95,59 @@
     <div class="footer">Letzte Aktualisierung: <span id="lastUpdate">–</span></div>
 
     <script>
-        async function fetchStatus() {
-            const res = await fetch('/status');
-            const data = await res.json();
-            const now = new Date().toLocaleTimeString();
-            document.getElementById("lastUpdate").innerText = now;
+        function fmtSince(value) {
+            if (value === null || value === undefined) {
+                return "–";
+            }
+            return value.toFixed(1) + " s";
+        }
 
-            for (const [mac, present] of Object.entries(data)) {
-                const cell = document.getElementById("status-" + mac.replace(/:/g, ""));
-                if (present) {
-                    cell.innerHTML = "🟢 <span class='present'>Anwesend</span>";
-                } else {
-                    cell.innerHTML = "🔴 <span class='absent'>Abwesend</span>";
+        function fmtResult(label) {
+            switch (label) {
+                case "hit":
+                    return "🟢 Treffer";
+                case "miss":
+                    return "🔴 Fehlversuch";
+                case "skip":
+                    return "⏭️ Übersprungen";
+                default:
+                    return "–";
+            }
+        }
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/status');
+                const data = await res.json();
+                const now = new Date().toLocaleTimeString();
+                document.getElementById("lastUpdate").innerText = now;
+
+                document.getElementById("activeDevice").innerText = data.current_probe || '–';
+
+                for (const [mac, info] of Object.entries(data.devices)) {
+                    const key = mac.replace(/:/g, "");
+                    const row = document.getElementById("row-" + key);
+                    const statusCell = document.getElementById("status-" + key);
+                    const resultCell = document.getElementById("result-" + key);
+                    const failCell = document.getElementById("fails-" + key);
+                    const sinceCell = document.getElementById("since-" + key);
+                    const probeCell = document.getElementById("probe-" + key);
+
+                    row.classList.toggle('probing', info.probing);
+
+                    if (info.present) {
+                        statusCell.innerHTML = "🟢 <span class='present'>Anwesend</span>";
+                    } else {
+                        statusCell.innerHTML = "🔴 <span class='absent'>Abwesend</span>";
+                    }
+
+                    resultCell.innerText = fmtResult(info.last_result);
+                    failCell.innerText = info.failures;
+                    sinceCell.innerText = fmtSince(info.since_last_success);
+                    probeCell.innerText = info.probing ? "✔" : "–";
                 }
+            } catch (err) {
+                console.error('Status abrufen fehlgeschlagen', err);
             }
         }
 
