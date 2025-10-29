@@ -36,7 +36,7 @@ macaddresses = [
     "80:04:5F:A2:66:57",
 ]
 
-scaninterval = 7
+scaninterval = 12
 relayclosetime = 0.5
 presencebeepduration = 0.1
 presencebeepcount = 2
@@ -45,9 +45,14 @@ absencebeepcount = 2
 buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
-presence_grace_period = 35
+presence_grace_period = 60
 scanner_restart_delay = 4
 scanner_command = ["stdbuf", "-oL", "bluetoothctl"]
+active_probe_trigger = 25
+active_probe_timeout = 3
+active_probe_retries = 2
+active_probe_pause = 0.5
+use_hcitool_fallback = True
 
 
 logging.basicConfig(
@@ -183,6 +188,72 @@ bluetooth_scanner = BluetoothScanner(macaddresses, state_lock)
 atexit.register(bluetooth_scanner.stop)
 
 
+def _run_command(cmd, timeout=None):
+    try:
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logging.debug("Timeout für Kommando: %s", " ".join(cmd))
+        return None
+    except FileNotFoundError as exc:
+        logging.error("Befehl %s nicht gefunden.", exc.filename or cmd[0])
+        return None
+    except Exception as exc:  # pragma: no cover
+        logging.error("Fehler bei Kommando %s: %s", " ".join(cmd), exc)
+        return None
+
+
+def active_probe(mac: str) -> bool:
+    for attempt in range(1, active_probe_retries + 1):
+        logging.debug(
+            "Aktive Probe %d/%d via bluetoothctl für %s",
+            attempt,
+            active_probe_retries,
+            mac,
+        )
+        res = _run_command(
+            ["timeout", str(active_probe_timeout), "bluetoothctl", "info", mac]
+        )
+        if res is not None:
+            if res.stderr:
+                logging.debug("bluetoothctl stderr (%s): %s", mac, res.stderr.strip())
+            stdout = res.stdout.strip()
+            if stdout:
+                preview = "; ".join(stdout.splitlines()[:3])
+                logging.debug("bluetoothctl info (%s) → rc=%s, Daten=%s", mac, res.returncode, preview)
+            if res.returncode == 0 and ("Connected: yes" in stdout or "RSSI:" in stdout):
+                return True
+
+        if use_hcitool_fallback:
+            logging.debug(
+                "Aktive Probe %d/%d via hcitool name für %s",
+                attempt,
+                active_probe_retries,
+                mac,
+            )
+            res = _run_command(
+                ["timeout", str(active_probe_timeout), "hcitool", "name", mac]
+            )
+            if res is not None:
+                if res.stderr:
+                    logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
+                if res.stdout and res.returncode == 0:
+                    logging.debug("hcitool name (%s) Antwort: %s", mac, res.stdout.strip())
+                    return True
+
+        if attempt < active_probe_retries:
+            time.sleep(active_probe_pause)
+
+    logging.debug("Aktive Probe endgültig fehlgeschlagen für %s", mac)
+    return False
+
+
 def beep(times: int, duration: float) -> None:
     for _ in range(times):
         buzzer.on()
@@ -220,31 +291,71 @@ def presence_monitor() -> None:
         now = cycle_start
         logging.debug("Presence-Zyklus gestartet (now=%.3f)", now)
         with state_lock:
-            present_macs = [
-                mac
-                for mac in macaddresses
-                if now - device_last_seen.get(mac, 0.0) <= presence_grace_period
-            ]
-            status_lines = []
+            status_info = {}
             for mac in macaddresses:
                 last_seen = device_last_seen.get(mac, 0.0)
                 delta = now - last_seen if last_seen else float("inf")
-                is_present = mac in present_macs
-                logging.debug(
-                    "Bewertung %s → last_seen=%.3f, delta=%.3f, präsent=%s",
-                    mac,
-                    last_seen,
-                    delta,
-                    is_present,
-                )
-                if last_seen:
-                    status_lines.append(f"{mac} → {'PRESENT' if is_present else 'ABSENT'} ({delta:.1f}s)")
-                else:
-                    status_lines.append(f"{mac} → {'PRESENT' if is_present else 'ABSENT'} (noch nie gesehen)")
-            for mac in macaddresses:
-                device_states[mac] = mac in present_macs
+                status_info[mac] = {
+                    "last_seen": last_seen,
+                    "delta": delta,
+                    "present": bool(last_seen and delta <= presence_grace_period),
+                    "probe": "skipped",
+                }
+
+        for mac, info in status_info.items():
+            if info["present"]:
+                continue
+            trigger_probe = (
+                info["last_seen"] == 0.0 or info["delta"] >= active_probe_trigger
+            )
+            if not trigger_probe:
+                continue
+            logging.debug(
+                "Aktive Probe erforderlich für %s (delta=%.1fs)",
+                mac,
+                info["delta"] if info["delta"] != float("inf") else -1.0,
+            )
+            success = active_probe(mac)
+            info["probe"] = "success" if success else "fail"
+            if success:
+                probe_time = time.time()
+                info["last_seen"] = probe_time
+                info["delta"] = 0.0
+                info["present"] = True
+                with state_lock:
+                    device_last_seen[mac] = probe_time
+            else:
+                logging.debug("Aktive Probe ergab keine Präsenz für %s", mac)
+
+        with state_lock:
+            present_macs = [mac for mac, info in status_info.items() if info["present"]]
+            for mac, info in status_info.items():
+                device_states[mac] = info["present"]
             devicepresent = bool(present_macs)
             current_presence = devicepresent
+
+        status_lines = []
+        for mac, info in status_info.items():
+            if info["last_seen"]:
+                delta = time.time() - info["last_seen"]
+                note = f"{delta:.1f}s"
+            else:
+                note = "noch nie gesehen"
+            if info["probe"] == "success":
+                note += ", probe ok"
+            elif info["probe"] == "fail":
+                note += ", probe fail"
+            else:
+                note += ", passiv"
+            status_lines.append(f"{mac} → {'PRESENT' if info['present'] else 'ABSENT'} ({note})")
+            logging.debug(
+                "Bewertung %s → last_seen=%.3f, delta=%.3f, präsent=%s, probe=%s",
+                mac,
+                info['last_seen'],
+                info['delta'],
+                info['present'],
+                info['probe'],
+            )
         logging.info("Statusübersicht: %s", " | ".join(status_lines))
 
         logging.info(
