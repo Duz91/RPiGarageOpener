@@ -1,5 +1,4 @@
 from flask import Flask, render_template, jsonify
-import atexit
 import logging
 import re
 import subprocess
@@ -71,103 +70,6 @@ device_states = {mac: False for mac in macaddresses}
 devicepresent = False
 device_last_seen = {mac: 0.0 for mac in macaddresses}
 device_next_probe = {mac: 0.0 for mac in macaddresses}
-
-
-class BluetoothScanner(threading.Thread):
-    def __init__(self, targets, lock):
-        super().__init__(daemon=True)
-        self.targets = {mac.lower(): mac for mac in targets}
-        self.lock = lock
-        self.running = threading.Event()
-        self.running.set()
-        self.process = None
-        self.mac_regex = re.compile(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.IGNORECASE)
-
-    def run(self):
-        while self.running.is_set():
-            try:
-                self._start_process()
-                if bluetooth_adapter:
-                    self._send_command(f"select {bluetooth_adapter}")
-                self._send_command("power on")
-                self._send_command("scan on")
-                logging.info("Bluetooth-Scanner gestartet.")
-
-                while self.running.is_set():
-                    line = self.process.stdout.readline()
-                    if not line:
-                        break
-                    mac = self._extract_mac(line)
-                    if not mac:
-                        continue
-                    now = time.time()
-                    with self.lock:
-                        device_last_seen[mac] = now
-                    logging.debug("Scanner meldet %s @ %.3f", mac, now)
-            except FileNotFoundError:
-                logging.error("bluetoothctl nicht gefunden – Scanner deaktiviert.")
-                return
-            except Exception as exc:
-                logging.warning("Bluetooth-Scanner Fehler: %s", exc)
-            finally:
-                self._stop_process()
-                if self.running.is_set():
-                    time.sleep(scanner_restart_delay)
-
-    def stop(self):
-        self.running.clear()
-        self._stop_process()
-
-    def _start_process(self):
-        self.process = subprocess.Popen(
-            ["bluetoothctl"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-
-    def _send_command(self, command: str) -> None:
-        if not self.process or not self.process.stdin:
-            return
-        try:
-            self.process.stdin.write(command + "\n")
-            self.process.stdin.flush()
-        except BrokenPipeError:
-            pass
-
-    def _extract_mac(self, line: str):
-        lower_line = line.lower()
-        for mac, original in self.targets.items():
-            if mac in lower_line:
-                return original
-        match = self.mac_regex.search(lower_line)
-        if not match:
-            return None
-        mac = match.group(1).upper()
-        return self.targets.get(mac.lower())
-
-    def _stop_process(self):
-        if not self.process:
-            return
-        try:
-            self._send_command("scan off")
-            self._send_command("quit")
-        except Exception:
-            pass
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=2)
-        except Exception:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
-        self.process = None
-
-
-bluetooth_scanner = BluetoothScanner(macaddresses, state_lock)
-atexit.register(bluetooth_scanner.stop)
 
 
 def probe_device(mac: str) -> bool:
@@ -351,7 +253,6 @@ button.when_pressed = button_pressed
 
 
 def start_threads() -> None:
-    bluetooth_scanner.start()
     threading.Thread(target=presence_monitor, daemon=True).start()
     threading.Thread(target=blink_led, daemon=True).start()
 
