@@ -92,6 +92,20 @@
 
     <button onclick="activateRelay()">Relais manuell aktivieren</button>
 
+    <h2>GPIO Status</h2>
+    <table id="gpioTable">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Pin</th>
+                <th>Funktion</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody id="gpioBody">
+        </tbody>
+    </table>
+
     <div class="footer">Letzte Aktualisierung: <span id="lastUpdate">–</span></div>
 
     <script>
@@ -145,6 +159,19 @@
                     failCell.innerText = info.failures;
                     sinceCell.innerText = fmtSince(info.since_last_success);
                     probeCell.innerText = info.probing ? "✔" : "–";
+                }
+
+                const gpioBody = document.getElementById('gpioBody');
+                gpioBody.innerHTML = '';
+                for (const info of data.gpio) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${info.name}</td>
+                        <td>${info.pin}</td>
+                        <td>${info.role}</td>
+                        <td>${info.active ? '🟢 aktiv' : '⚪ inaktiv'}</td>
+                    `;
+                    gpioBody.appendChild(tr);
                 }
             } catch (err) {
                 console.error('Status abrufen fehlgeschlagen', err);

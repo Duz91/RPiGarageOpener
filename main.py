@@ -62,6 +62,13 @@ relay = OutputDevice(RELAYPIN, active_high=False)
 buzzer = OutputDevice(BUZZERPIN, active_high=False)
 button = Button(BUTTONPIN, pull_up=True, bounce_time=buttonbouncetime)
 
+GPIO_INFO = [
+    {"name": "LED", "pin": LEDPIN, "role": "Statusanzeige", "device": led},
+    {"name": "Relais", "pin": RELAYPIN, "role": "Garagentor", "device": relay},
+    {"name": "Buzzer", "pin": BUZZERPIN, "role": "Signalton", "device": buzzer},
+    {"name": "Taster", "pin": BUTTONPIN, "role": "Manuelle Öffnung", "device": button},
+]
+
 state_lock = threading.Lock()
 device_states = {mac: False for mac in macaddresses}
 devicepresent = False
@@ -291,10 +298,29 @@ def status():
                 "last_result": device_last_result[mac],
                 "probing": mac == current_probe_target,
             }
+        gpio = []
+        for info in GPIO_INFO:
+            device = info["device"]
+            if isinstance(device, Button):
+                value = bool(device.is_pressed)
+            else:
+                try:
+                    value = bool(device.value)
+                except AttributeError:
+                    value = False
+            gpio.append(
+                {
+                    "name": info["name"],
+                    "pin": info["pin"],
+                    "role": info["role"],
+                    "active": value,
+                }
+            )
         payload = {
             "devices": devices,
             "any_present": devicepresent,
             "current_probe": current_probe_target,
+            "gpio": gpio,
             "timestamp": now,
         }
     return jsonify(payload)
