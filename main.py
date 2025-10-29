@@ -225,20 +225,27 @@ def presence_monitor() -> None:
                 for mac in macaddresses
                 if now - device_last_seen.get(mac, 0.0) <= presence_grace_period
             ]
+            status_lines = []
             for mac in macaddresses:
                 last_seen = device_last_seen.get(mac, 0.0)
                 delta = now - last_seen if last_seen else float("inf")
+                is_present = mac in present_macs
                 logging.debug(
                     "Bewertung %s → last_seen=%.3f, delta=%.3f, präsent=%s",
                     mac,
                     last_seen,
                     delta,
-                    mac in present_macs,
+                    is_present,
                 )
+                if last_seen:
+                    status_lines.append(f"{mac} → {'PRESENT' if is_present else 'ABSENT'} ({delta:.1f}s)")
+                else:
+                    status_lines.append(f"{mac} → {'PRESENT' if is_present else 'ABSENT'} (noch nie gesehen)")
             for mac in macaddresses:
                 device_states[mac] = mac in present_macs
             devicepresent = bool(present_macs)
             current_presence = devicepresent
+        logging.info("Statusübersicht: %s", " | ".join(status_lines))
 
         logging.info(
             "Scan abgeschlossen → anwesend: %s",
