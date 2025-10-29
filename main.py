@@ -1,7 +1,5 @@
 from flask import Flask, render_template, jsonify
-import atexit
 import logging
-import re
 import subprocess
 import threading
 import time
@@ -36,7 +34,7 @@ macaddresses = [
     "80:04:5F:A2:66:57",
 ]
 
-scaninterval = 5
+scaninterval = 4
 relayclosetime = 0.5
 presencebeepduration = 0.1
 presencebeepcount = 2
@@ -45,16 +43,12 @@ absencebeepcount = 2
 buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
-presence_grace_period = 35
-scanner_restart_delay = 4
-scanner_command = ["stdbuf", "-oL", "bluetoothctl"]
-active_probe_trigger = 30
 active_probe_schedule = [
-    (2.0, 1, 0.5),
+    (2.0, 1, 0.4),
     (3.0, 2, 0.8),
 ]
-active_probe_cooldown = 30
-use_hcitool_fallback = True
+max_absent_failures = 2
+inter_device_pause = 0.4
 
 
 logging.basicConfig(
@@ -72,123 +66,8 @@ button = Button(BUTTONPIN, pull_up=True, bounce_time=buttonbouncetime)
 state_lock = threading.Lock()
 device_states = {mac: False for mac in macaddresses}
 devicepresent = False
-device_last_seen = {mac: 0.0 for mac in macaddresses}
-device_last_probe = {mac: 0.0 for mac in macaddresses}
-
-
-class BluetoothScanner(threading.Thread):
-    def __init__(self, targets, lock):
-        super().__init__(daemon=True)
-        self.targets = {mac.lower(): mac for mac in targets}
-        self.lock = lock
-        self.running = threading.Event()
-        self.running.set()
-        self.process = None
-        self.mac_regex = re.compile(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.IGNORECASE)
-
-    def run(self):
-        while self.running.is_set():
-            try:
-                self._start_process()
-                self._configure_controller()
-                logging.info("Bluetooth-Scanner aktiv.")
-
-                while self.running.is_set():
-                    line = self.process.stdout.readline()
-                    if not line:
-                        break
-                    mac = self._extract_mac(line)
-                    if not mac:
-                        continue
-                    now = time.time()
-                    with self.lock:
-                        device_last_seen[mac] = now
-                    logging.debug("Scanner sieht %s @ %.3f (%s)", mac, now, line.strip())
-            except FileNotFoundError:
-                logging.error("bluetoothctl nicht gefunden – Scanner gestoppt.")
-                return
-            except Exception as exc:
-                logging.warning("Bluetooth-Scanner Fehler: %s", exc)
-            finally:
-                self._stop_process()
-                if self.running.is_set():
-                    time.sleep(scanner_restart_delay)
-
-    def stop(self):
-        self.running.clear()
-        self._stop_process()
-
-    def _start_process(self):
-        try:
-            cmd = scanner_command
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-        except FileNotFoundError:
-            self.process = subprocess.Popen(
-                ["bluetoothctl"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-
-    def _configure_controller(self):
-        if not self.process or not self.process.stdin:
-            return
-        commands = [
-            "set le on",
-            "set duplicate-data true",
-            "scan on",
-        ]
-        for cmd in commands:
-            self._send_command(cmd)
-
-    def _send_command(self, command: str) -> None:
-        if not self.process or not self.process.stdin:
-            return
-        try:
-            self.process.stdin.write(command + "\n")
-            self.process.stdin.flush()
-        except BrokenPipeError:
-            pass
-
-    def _extract_mac(self, line: str):
-        lower_line = line.lower()
-        for mac_lower, original in self.targets.items():
-            if mac_lower in lower_line:
-                return original
-        match = self.mac_regex.search(lower_line)
-        if match:
-            mac = match.group(1).upper()
-            return self.targets.get(mac.lower())
-        return None
-
-    def _stop_process(self):
-        if not self.process:
-            return
-        try:
-            self._send_command("scan off")
-            self._send_command("quit")
-        except Exception:
-            pass
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=2)
-        except Exception:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
-        self.process = None
-
-
-bluetooth_scanner = BluetoothScanner(macaddresses, state_lock)
-atexit.register(bluetooth_scanner.stop)
+device_last_success = {mac: 0.0 for mac in macaddresses}
+device_failure_counts = {mac: 0 for mac in macaddresses}
 
 
 def _run_command(cmd, timeout=None):
@@ -274,91 +153,63 @@ def blink_led() -> None:
 def presence_monitor() -> None:
     global devicepresent
     previous_presence = None
+    order = list(macaddresses)
+    start_index = 0
 
     while True:
         cycle_start = time.time()
-        now = cycle_start
-        logging.debug("Presence-Zyklus gestartet (now=%.3f)", now)
-        with state_lock:
-            status_info = {}
-            for mac in macaddresses:
-                last_seen = device_last_seen.get(mac, 0.0)
-                last_probe = device_last_probe.get(mac, 0.0)
-                delta = now - last_seen if last_seen else float("inf")
-                status_info[mac] = {
-                    "last_seen": last_seen,
-                    "last_probe": last_probe,
-                    "delta": delta,
-                    "present": bool(last_seen and delta <= presence_grace_period),
-                    "probe": "skipped",
-                }
-
-        for mac, info in status_info.items():
-            if info["present"]:
-                continue
-            time_since_probe = (
-                now - info["last_probe"] if info["last_probe"] else float("inf")
-            )
-            trigger_probe = (
-                (info["last_seen"] == 0.0 or info["delta"] >= active_probe_trigger)
-                and time_since_probe >= active_probe_cooldown
-            )
-            if not trigger_probe:
-                continue
-            logging.debug(
-                "Aktive Probe erforderlich für %s (delta=%.1fs, seit Probe %.1fs)",
-                mac,
-                info["delta"] if info["delta"] != float("inf") else -1.0,
-                time_since_probe if time_since_probe != float("inf") else -1.0,
-            )
-            probe_start = time.time()
-            with state_lock:
-                device_last_probe[mac] = probe_start
-            info["last_probe"] = probe_start
-
+        logging.debug("Presence-Zyklus gestartet (now=%.3f)", cycle_start)
+        results = {}
+        for step in range(len(order)):
+            mac = order[(start_index + step) % len(order)]
+            logging.debug("Starte aktive Prüfung für %s", mac)
             success = active_probe(mac)
-            info["probe"] = "success" if success else "fail"
-            if success:
-                probe_time = time.time()
-                info["last_seen"] = probe_time
-                info["delta"] = 0.0
-                info["present"] = True
-                with state_lock:
-                    device_last_seen[mac] = probe_time
-            else:
-                logging.debug("Aktive Probe ergab keine Präsenz für %s", mac)
+            results[mac] = success
+            if step < len(order) - 1:
+                time.sleep(inter_device_pause)
+        start_index = (start_index + 1) % len(order)
 
-        with state_lock:
-            present_macs = [mac for mac, info in status_info.items() if info["present"]]
-            for mac, info in status_info.items():
-                device_states[mac] = info["present"]
-            devicepresent = bool(present_macs)
-            current_presence = devicepresent
-
+        now = time.time()
         status_lines = []
-        for mac, info in status_info.items():
-            if info["last_seen"]:
-                delta = time.time() - info["last_seen"]
-                note = f"{delta:.1f}s"
-            else:
-                note = "noch nie gesehen"
-            if info["probe"] == "success":
-                note += ", probe ok"
-            elif info["probe"] == "fail":
-                note += ", probe fail"
-            else:
-                note += ", passiv"
-            status_lines.append(f"{mac} → {'PRESENT' if info['present'] else 'ABSENT'} ({note})")
-            logging.debug(
-                "Bewertung %s → last_seen=%.3f, delta=%.3f, präsent=%s, probe=%s",
-                mac,
-                info['last_seen'],
-                info['delta'],
-                info['present'],
-                info['probe'],
-            )
-        logging.info("Statusübersicht: %s", " | ".join(status_lines))
+        with state_lock:
+            for mac in order:
+                success = results.get(mac, False)
+                if success:
+                    device_states[mac] = True
+                    device_failure_counts[mac] = 0
+                    device_last_success[mac] = now
+                else:
+                    device_failure_counts[mac] += 1
+                    device_failure_counts[mac] = min(
+                        device_failure_counts[mac], max_absent_failures + 1
+                    )
+                    if device_failure_counts[mac] > max_absent_failures:
+                        device_states[mac] = False
+                state = device_states[mac]
+                fails = device_failure_counts[mac]
+                last_success = device_last_success[mac]
+                if last_success:
+                    delta = now - last_success
+                    note = f"{delta:.1f}s seit Erfolg"
+                else:
+                    note = "keine Messung"
+                note = f"{note}, {'hit' if success else 'miss'}, fails={fails}"
+                status_lines.append(
+                    f"{mac} → {'PRESENT' if state else 'ABSENT'} ({note})"
+                )
+                logging.debug(
+                    "Bewertung %s → state=%s, result=%s, fails=%d, last_success=%.3f",
+                    mac,
+                    state,
+                    "hit" if success else "miss",
+                    fails,
+                    last_success,
+                )
+            devicepresent = any(device_states.values())
+            current_presence = devicepresent
+            present_macs = [mac for mac, state in device_states.items() if state]
 
+        logging.info("Statusübersicht: %s", " | ".join(status_lines))
         logging.info(
             "Scan abgeschlossen → anwesend: %s",
             ", ".join(present_macs) if present_macs else "keine Geräte",
@@ -409,7 +260,6 @@ button.when_pressed = button_pressed
 
 
 def start_threads() -> None:
-    bluetooth_scanner.start()
     threading.Thread(target=presence_monitor, daemon=True).start()
     threading.Thread(target=blink_led, daemon=True).start()
 
