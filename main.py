@@ -46,11 +46,9 @@ presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
 bluetooth_probe_timeout = 4
 presence_grace_period = 25
-present_reprobe_interval = 20
+present_reprobe_interval = 16
 absent_retry_interval = 6
 probe_pause = 0.2
-bluetooth_adapter = "hci0"
-scanner_restart_delay = 4
 
 
 logging.basicConfig(
@@ -95,7 +93,27 @@ def probe_device(mac: str) -> bool:
     if res.returncode == 124:
         logging.debug("bluetoothctl Timeout für %s", mac)
         return False
-    return "Device" in res.stdout or "Name:" in res.stdout
+    if res.returncode not in (0, 124):
+        logging.debug("bluetoothctl info (%s) ungewöhnlicher Rückgabewert: %s", mac, res.returncode)
+
+    stdout = res.stdout.strip()
+    if stdout:
+        lines = stdout.splitlines()
+        preview = "; ".join(lines[:3])
+        logging.debug("bluetoothctl info (%s) → rc=%s, Daten=%s", mac, res.returncode, preview)
+    else:
+        logging.debug("bluetoothctl info (%s) → rc=%s, keine Ausgabe", mac, res.returncode)
+
+    present_tokens = {"Connected: yes"}
+    present = any(token in stdout for token in present_tokens)
+    if not present:
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("RSSI:"):
+                present = True
+                break
+    logging.debug("Ergebnis bluetoothctl info (%s): %s", mac, "PRESENT" if present else "ABSENT")
+    return present
 
 
 def beep(times: int, duration: float) -> None:
@@ -151,9 +169,9 @@ def presence_monitor() -> None:
             if seen_recently:
                 current_states[mac] = True
                 present_macs.append(mac)
-                next_probe_updates[mac] = now + present_reprobe_interval
+                next_probe_updates[mac] = next_allowed_probe if next_allowed_probe > 0 else now
                 logging.debug(
-                    "Markiere %s als präsent (last_seen=%.3f, next_probe=%.3f)",
+                    "Markiere %s als präsent (last_seen=%.3f, next_probe bleibt=%.3f)",
                     mac,
                     last_seen,
                     next_probe_updates[mac],
