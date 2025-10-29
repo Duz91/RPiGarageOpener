@@ -51,7 +51,7 @@ probe_pause = 0.2
 
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
@@ -70,6 +70,7 @@ device_next_probe = {mac: 0.0 for mac in macaddresses}
 
 
 def probe_device(mac: str) -> bool:
+    logging.debug("Starte Probe für %s", mac)
     try:
         res = subprocess.run(
             ["hcitool", "name", mac],
@@ -130,6 +131,7 @@ def presence_monitor() -> None:
     while True:
         cycle_start = time.time()
         now = cycle_start
+        logging.debug("Presence-Zyklus gestartet (now=%.3f)", now)
         current_states = {}
         present_macs = []
 
@@ -139,6 +141,13 @@ def presence_monitor() -> None:
                 current_states[mac] = seen_recently
                 if seen_recently:
                     present_macs.append(mac)
+                logging.debug(
+                    "Überspringe Probe für %s (next_probe=%.3f, last_seen=%.3f, seen_recently=%s)",
+                    mac,
+                    device_next_probe[mac],
+                    device_last_seen[mac],
+                    seen_recently,
+                )
                 continue
 
             is_present = probe_device(mac)
@@ -147,12 +156,24 @@ def presence_monitor() -> None:
                 device_next_probe[mac] = now + present_reprobe_interval
                 current_states[mac] = True
                 present_macs.append(mac)
+                logging.debug(
+                    "Probe erfolgreich für %s (next_probe=%.3f)",
+                    mac,
+                    device_next_probe[mac],
+                )
             else:
                 device_next_probe[mac] = now + absent_retry_interval
                 seen_recently = (now - device_last_seen[mac]) <= presence_grace_period
                 current_states[mac] = seen_recently
                 if seen_recently:
                     present_macs.append(mac)
+                logging.debug(
+                    "Probe fehlgeschlagen für %s (next_probe=%.3f, last_seen=%.3f, seen_recently=%s)",
+                    mac,
+                    device_next_probe[mac],
+                    device_last_seen[mac],
+                    seen_recently,
+                )
             time.sleep(probe_pause)
 
         with state_lock:
@@ -178,6 +199,12 @@ def presence_monitor() -> None:
         sleep_time = scaninterval - elapsed
         if sleep_time > 0:
             time.sleep(sleep_time)
+        else:
+            logging.warning(
+                "Presence-Zyklus überschreitet scaninterval (elapsed=%.3f, interval=%.3f)",
+                elapsed,
+                scaninterval,
+            )
 
 
 @app.route("/")
