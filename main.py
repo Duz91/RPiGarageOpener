@@ -44,6 +44,10 @@ buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
 bluetooth_probe_timeout = 4
+presence_grace_period = 25
+present_reprobe_interval = 20
+absent_retry_interval = 6
+probe_pause = 0.2
 
 
 logging.basicConfig(
@@ -61,6 +65,8 @@ button = Button(BUTTONPIN, pull_up=True, bounce_time=buttonbouncetime)
 state_lock = threading.Lock()
 device_states = {mac: False for mac in macaddresses}
 devicepresent = False
+device_last_seen = {mac: 0.0 for mac in macaddresses}
+device_next_probe = {mac: 0.0 for mac in macaddresses}
 
 
 def probe_device(mac: str) -> bool:
@@ -72,6 +78,7 @@ def probe_device(mac: str) -> bool:
             text=True,
             check=False,
             timeout=bluetooth_probe_timeout,
+            start_new_session=True,
         )
     except subprocess.TimeoutExpired:
         logging.debug("hcitool Timeout für %s", mac)
@@ -122,17 +129,35 @@ def presence_monitor() -> None:
 
     while True:
         cycle_start = time.time()
+        now = cycle_start
         current_states = {}
+        present_macs = []
 
         for mac in macaddresses:
-            current_states[mac] = probe_device(mac)
-            time.sleep(0.1)
+            if now < device_next_probe[mac]:
+                seen_recently = (now - device_last_seen[mac]) <= presence_grace_period
+                current_states[mac] = seen_recently
+                if seen_recently:
+                    present_macs.append(mac)
+                continue
 
-        present_macs = [mac for mac, is_present in current_states.items() if is_present]
+            is_present = probe_device(mac)
+            if is_present:
+                device_last_seen[mac] = now
+                device_next_probe[mac] = now + present_reprobe_interval
+                current_states[mac] = True
+                present_macs.append(mac)
+            else:
+                device_next_probe[mac] = now + absent_retry_interval
+                seen_recently = (now - device_last_seen[mac]) <= presence_grace_period
+                current_states[mac] = seen_recently
+                if seen_recently:
+                    present_macs.append(mac)
+            time.sleep(probe_pause)
 
         with state_lock:
             device_states.update(current_states)
-            devicepresent = any(present_macs)
+            devicepresent = bool(present_macs)
             current_presence = devicepresent
 
         logging.info(
@@ -150,7 +175,9 @@ def presence_monitor() -> None:
             previous_presence = current_presence
 
         elapsed = time.time() - cycle_start
-        time.sleep(max(0.0, scaninterval - elapsed))
+        sleep_time = scaninterval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 @app.route("/")
