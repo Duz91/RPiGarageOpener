@@ -1,105 +1,24 @@
 <!DOCTYPE html>
-<html lang="de">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Geräte-Status</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f8f9fa;
-            text-align: center;
-            padding: 20px;
-        }
-        table {
-            margin: 0 auto;
-            border-collapse: collapse;
-            width: 60%;
-        }
-        th, td {
-            border: 1px solid #ccc;
-            padding: 12px;
-            font-size: 1.1em;
-        }
-        th {
-            background: #007bff;
-            color: white;
-        }
-        .present {
-            color: green;
-            font-weight: bold;
-        }
-        .absent {
-            color: red;
-            font-weight: bold;
-        }
-        .footer {
-            margin-top: 30px;
-            font-size: 0.9em;
-            color: #666;
-        }
-        button {
-            margin-top: 20px;
-            padding: 10px 20px;
-            border: none;
-            background: #007bff;
-            color: white;
-            border-radius: 6px;
-            cursor: pointer;
-        }
-        button:hover {
-            background: #0056b3;
-        }
-    </style>
+    <title>Garagentorsteuerung</title>
 </head>
 <body>
-    <h1>Bluetooth-Geräte Überwachung</h1>
+    <h1>Garagentorsteuerung</h1>
 
-    <table id="deviceTable">
-        <thead>
-            <tr>
-                <th>MAC-Adresse</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for mac in macaddresses %}
-            <tr>
-                <td>{{ mac }}</td>
-                <td id="status-{{ mac|replace(':', '') }}">⏳ Überprüfe...</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-
-    <button onclick="activateRelay()">Relais manuell aktivieren</button>
-
-    <div class="footer">Letzte Aktualisierung: <span id="lastUpdate">–</span></div>
+    <button onclick="openGarage()">Garage öffnen</button>
 
     <script>
-        async function fetchStatus() {
-            const res = await fetch('/status');
-            const data = await res.json();
-            const now = new Date().toLocaleTimeString();
-            document.getElementById("lastUpdate").innerText = now;
-
-            for (const [mac, present] of Object.entries(data)) {
-                const cell = document.getElementById("status-" + mac.replace(/:/g, ""));
-                if (present) {
-                    cell.innerHTML = "🟢 <span class='present'>Anwesend</span>";
-                } else {
-                    cell.innerHTML = "🔴 <span class='absent'>Abwesend</span>";
-                }
-            }
+        function openGarage() {
+            fetch('/open_garage', { method: 'POST' })
+                .then(response => {
+                    if (response.ok) {
+                        alert('Garage geöffnet!');
+                    } else {
+                        alert('Fehler beim Öffnen der Garage.');
+                    }
+                });
         }
-
-        async function activateRelay() {
-            await fetch('/activaterelay');
-            alert('Relais aktiviert!');
-        }
-
-        // Regelmäßig aktualisieren
-        fetchStatus();
-        setInterval(fetchStatus, 5000);
     </script>
 </body>
 </html>
