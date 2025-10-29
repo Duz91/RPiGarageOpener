@@ -155,35 +155,56 @@ def presence_monitor() -> None:
     previous_presence = None
     order = list(macaddresses)
     start_index = 0
+    monitored_mac = None
 
     while True:
         cycle_start = time.time()
         logging.debug("Presence-Zyklus gestartet (now=%.3f)", cycle_start)
-        results = {}
-        for step in range(len(order)):
-            mac = order[(start_index + step) % len(order)]
-            logging.debug("Starte aktive Prüfung für %s", mac)
-            success = active_probe(mac)
-            results[mac] = success
-            if step < len(order) - 1:
-                time.sleep(inter_device_pause)
-        start_index = (start_index + 1) % len(order)
+        results = {mac: None for mac in order}
+
+        if monitored_mac is None:
+            logging.debug("Kein aktives Gerät – starte Suche")
+            next_monitored = None
+            for step in range(len(order)):
+                mac = order[(start_index + step) % len(order)]
+                logging.debug("Starte aktive Prüfung für %s", mac)
+                success = active_probe(mac)
+                results[mac] = success
+                if success:
+                    next_monitored = mac
+                    logging.debug("%s als aktives Gerät übernommen", mac)
+                    break
+                if step < len(order) - 1:
+                    time.sleep(inter_device_pause)
+            start_index = (start_index + 1) % len(order)
+        else:
+            logging.debug("Prüfe ausschließlich aktives Gerät %s", monitored_mac)
+            success = active_probe(monitored_mac)
+            results[monitored_mac] = success
+            next_monitored = monitored_mac
 
         now = time.time()
         status_lines = []
         with state_lock:
             for mac in order:
-                success = results.get(mac, False)
+                success = results.get(mac)
                 if success:
                     device_states[mac] = True
                     device_failure_counts[mac] = 0
                     device_last_success[mac] = now
                 else:
-                    device_failure_counts[mac] += 1
-                    device_failure_counts[mac] = min(
-                        device_failure_counts[mac], max_absent_failures + 1
-                    )
-                    if device_failure_counts[mac] > max_absent_failures:
+                    if success is False:
+                        device_failure_counts[mac] += 1
+                        device_failure_counts[mac] = min(
+                            device_failure_counts[mac], max_absent_failures + 1
+                        )
+                        if (
+                            device_failure_counts[mac] > max_absent_failures
+                            and mac == next_monitored
+                        ):
+                            device_states[mac] = False
+                            next_monitored = None
+                    if mac != next_monitored:
                         device_states[mac] = False
                 state = device_states[mac]
                 fails = device_failure_counts[mac]
@@ -193,7 +214,13 @@ def presence_monitor() -> None:
                     note = f"{delta:.1f}s seit Erfolg"
                 else:
                     note = "keine Messung"
-                note = f"{note}, {'hit' if success else 'miss'}, fails={fails}"
+                if success is True:
+                    result_label = "hit"
+                elif success is False:
+                    result_label = "miss"
+                else:
+                    result_label = "skip"
+                note = f"{note}, {result_label}, fails={fails}"
                 status_lines.append(
                     f"{mac} → {'PRESENT' if state else 'ABSENT'} ({note})"
                 )
@@ -201,7 +228,7 @@ def presence_monitor() -> None:
                     "Bewertung %s → state=%s, result=%s, fails=%d, last_success=%.3f",
                     mac,
                     state,
-                    "hit" if success else "miss",
+                    result_label,
                     fails,
                     last_success,
                 )
@@ -209,6 +236,7 @@ def presence_monitor() -> None:
             current_presence = devicepresent
             present_macs = [mac for mac, state in device_states.items() if state]
 
+        monitored_mac = next_monitored
         logging.info("Statusübersicht: %s", " | ".join(status_lines))
         logging.info(
             "Scan abgeschlossen → anwesend: %s",
