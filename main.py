@@ -48,10 +48,12 @@ absenceledblinkinterval = 1.2
 presence_grace_period = 60
 scanner_restart_delay = 4
 scanner_command = ["stdbuf", "-oL", "bluetoothctl"]
-active_probe_trigger = 25
-active_probe_timeout = 3
-active_probe_retries = 2
-active_probe_pause = 0.5
+active_probe_trigger = 30
+active_probe_schedule = [
+    (1.5, 1, 0.3),
+    (3.0, 2, 0.6),
+]
+active_probe_cooldown = 15
 use_hcitool_fallback = True
 
 
@@ -71,6 +73,7 @@ state_lock = threading.Lock()
 device_states = {mac: False for mac in macaddresses}
 devicepresent = False
 device_last_seen = {mac: 0.0 for mac in macaddresses}
+device_last_probe = {mac: 0.0 for mac in macaddresses}
 
 
 class BluetoothScanner(threading.Thread):
@@ -210,46 +213,47 @@ def _run_command(cmd, timeout=None):
 
 
 def active_probe(mac: str) -> bool:
-    for attempt in range(1, active_probe_retries + 1):
-        logging.debug(
-            "Aktive Probe %d/%d via bluetoothctl für %s",
-            attempt,
-            active_probe_retries,
-            mac,
-        )
-        res = _run_command(
-            ["timeout", str(active_probe_timeout), "bluetoothctl", "info", mac]
-        )
-        if res is not None:
-            if res.stderr:
-                logging.debug("bluetoothctl stderr (%s): %s", mac, res.stderr.strip())
-            stdout = res.stdout.strip()
-            if stdout:
-                preview = "; ".join(stdout.splitlines()[:3])
-                logging.debug("bluetoothctl info (%s) → rc=%s, Daten=%s", mac, res.returncode, preview)
-            if res.returncode == 0 and ("Connected: yes" in stdout or "RSSI:" in stdout):
-                return True
-
-        if use_hcitool_fallback:
+    for stage, (timeout, attempts, pause) in enumerate(active_probe_schedule, start=1):
+        for attempt in range(1, attempts + 1):
             logging.debug(
-                "Aktive Probe %d/%d via hcitool name für %s",
+                "Aktive Probe Stufe %d Versuch %d via bluetoothctl für %s (Timeout %.1fs)",
+                stage,
                 attempt,
-                active_probe_retries,
                 mac,
+                timeout,
             )
-            res = _run_command(
-                ["timeout", str(active_probe_timeout), "hcitool", "name", mac]
-            )
+            res = _run_command(["timeout", str(timeout), "bluetoothctl", "info", mac])
             if res is not None:
                 if res.stderr:
-                    logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
-                if res.stdout and res.returncode == 0:
-                    logging.debug("hcitool name (%s) Antwort: %s", mac, res.stdout.strip())
+                    logging.debug("bluetoothctl stderr (%s): %s", mac, res.stderr.strip())
+                stdout = res.stdout.strip()
+                if stdout:
+                    preview = "; ".join(stdout.splitlines()[:3])
+                    logging.debug("bluetoothctl info (%s) → rc=%s, Daten=%s", mac, res.returncode, preview)
+                if res.returncode == 0 and ("Connected: yes" in stdout or "RSSI:" in stdout):
+                    logging.debug("Aktive Probe erfolgreich via bluetoothctl für %s", mac)
                     return True
 
-        if attempt < active_probe_retries:
-            time.sleep(active_probe_pause)
+            if use_hcitool_fallback:
+                logging.debug(
+                    "Aktive Probe Stufe %d Versuch %d via hcitool name für %s (Timeout %.1fs)",
+                    stage,
+                    attempt,
+                    mac,
+                    timeout,
+                )
+                res = _run_command(["timeout", str(timeout), "hcitool", "name", mac])
+                if res is not None:
+                    if res.stderr:
+                        logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
+                    if res.stdout and res.returncode == 0:
+                        logging.debug("Aktive Probe erfolgreich via hcitool für %s: %s", mac, res.stdout.strip())
+                        return True
 
+            if attempt < attempts:
+                time.sleep(pause)
+        if stage < len(active_probe_schedule):
+            time.sleep(pause)
     logging.debug("Aktive Probe endgültig fehlgeschlagen für %s", mac)
     return False
 
@@ -294,9 +298,11 @@ def presence_monitor() -> None:
             status_info = {}
             for mac in macaddresses:
                 last_seen = device_last_seen.get(mac, 0.0)
+                last_probe = device_last_probe.get(mac, 0.0)
                 delta = now - last_seen if last_seen else float("inf")
                 status_info[mac] = {
                     "last_seen": last_seen,
+                    "last_probe": last_probe,
                     "delta": delta,
                     "present": bool(last_seen and delta <= presence_grace_period),
                     "probe": "skipped",
@@ -305,16 +311,26 @@ def presence_monitor() -> None:
         for mac, info in status_info.items():
             if info["present"]:
                 continue
+            time_since_probe = (
+                now - info["last_probe"] if info["last_probe"] else float("inf")
+            )
             trigger_probe = (
-                info["last_seen"] == 0.0 or info["delta"] >= active_probe_trigger
+                (info["last_seen"] == 0.0 or info["delta"] >= active_probe_trigger)
+                and time_since_probe >= active_probe_cooldown
             )
             if not trigger_probe:
                 continue
             logging.debug(
-                "Aktive Probe erforderlich für %s (delta=%.1fs)",
+                "Aktive Probe erforderlich für %s (delta=%.1fs, seit Probe %.1fs)",
                 mac,
                 info["delta"] if info["delta"] != float("inf") else -1.0,
+                time_since_probe if time_since_probe != float("inf") else -1.0,
             )
+            probe_start = time.time()
+            with state_lock:
+                device_last_probe[mac] = probe_start
+            info["last_probe"] = probe_start
+
             success = active_probe(mac)
             info["probe"] = "success" if success else "fail"
             if success:
