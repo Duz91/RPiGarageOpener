@@ -36,7 +36,7 @@ macaddresses = [
     "80:04:5F:A2:66:57",
 ]
 
-scaninterval = 12
+scaninterval = 5
 relayclosetime = 0.5
 presencebeepduration = 0.1
 presencebeepcount = 2
@@ -45,15 +45,16 @@ absencebeepcount = 2
 buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
-presence_grace_period = 60
+presence_grace_period = 35
 scanner_restart_delay = 4
 scanner_command = ["stdbuf", "-oL", "bluetoothctl"]
 active_probe_trigger = 30
 active_probe_schedule = [
-    (1.5, 1, 0.3),
-    (3.0, 2, 0.6),
+    (2.0, 1, 0.5),
+    (3.0, 2, 0.8),
 ]
-active_probe_cooldown = 15
+active_probe_cooldown = 30
+use_hcitool_fallback = True
 
 
 logging.basicConfig(
@@ -212,6 +213,7 @@ def _run_command(cmd, timeout=None):
 
 
 def active_probe(mac: str) -> bool:
+
     for stage, (timeout, attempts, pause) in enumerate(active_probe_schedule, start=1):
         for attempt in range(1, attempts + 1):
             logging.debug(
@@ -226,8 +228,13 @@ def active_probe(mac: str) -> bool:
                 if res.stderr:
                     logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
                 if res.stdout and res.returncode == 0:
-                    logging.debug("Aktive Probe erfolgreich via hcitool für %s: %s", mac, res.stdout.strip())
+                    logging.debug(
+                        "Aktive Probe erfolgreich via hcitool für %s: %s",
+                        mac,
+                        res.stdout.strip(),
+                    )
                     return True
+
             if attempt < attempts:
                 time.sleep(pause)
         if stage < len(active_probe_schedule):
@@ -286,8 +293,7 @@ def presence_monitor() -> None:
                     "probe": "skipped",
                 }
 
-        for mac in sorted(status_info, key=lambda m: status_info[m]["delta"], reverse=True):
-            info = status_info[mac]
+        for mac, info in status_info.items():
             if info["present"]:
                 continue
             time_since_probe = (
