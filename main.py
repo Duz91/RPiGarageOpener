@@ -44,8 +44,7 @@ buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
 active_probe_schedule = [
-    (1.5, 1, 0.3),
-    (2.5, 1, 0.5),
+    (1.6, 1, 0.4),
 ]
 max_absent_failures = 2
 inter_device_pause = 0.4
