@@ -1,5 +1,7 @@
 from flask import Flask, render_template, jsonify
+import atexit
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -48,6 +50,8 @@ presence_grace_period = 25
 present_reprobe_interval = 20
 absent_retry_interval = 6
 probe_pause = 0.2
+bluetooth_adapter = "hci0"
+scanner_restart_delay = 4
 
 
 logging.basicConfig(
@@ -69,31 +73,127 @@ device_last_seen = {mac: 0.0 for mac in macaddresses}
 device_next_probe = {mac: 0.0 for mac in macaddresses}
 
 
+class BluetoothScanner(threading.Thread):
+    def __init__(self, targets, lock):
+        super().__init__(daemon=True)
+        self.targets = {mac.lower(): mac for mac in targets}
+        self.lock = lock
+        self.running = threading.Event()
+        self.running.set()
+        self.process = None
+        self.mac_regex = re.compile(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})", re.IGNORECASE)
+
+    def run(self):
+        while self.running.is_set():
+            try:
+                self._start_process()
+                if bluetooth_adapter:
+                    self._send_command(f"select {bluetooth_adapter}")
+                self._send_command("power on")
+                self._send_command("scan on")
+                logging.info("Bluetooth-Scanner gestartet.")
+
+                while self.running.is_set():
+                    line = self.process.stdout.readline()
+                    if not line:
+                        break
+                    mac = self._extract_mac(line)
+                    if not mac:
+                        continue
+                    now = time.time()
+                    with self.lock:
+                        device_last_seen[mac] = now
+                    logging.debug("Scanner meldet %s @ %.3f", mac, now)
+            except FileNotFoundError:
+                logging.error("bluetoothctl nicht gefunden – Scanner deaktiviert.")
+                return
+            except Exception as exc:
+                logging.warning("Bluetooth-Scanner Fehler: %s", exc)
+            finally:
+                self._stop_process()
+                if self.running.is_set():
+                    time.sleep(scanner_restart_delay)
+
+    def stop(self):
+        self.running.clear()
+        self._stop_process()
+
+    def _start_process(self):
+        self.process = subprocess.Popen(
+            ["bluetoothctl"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+    def _send_command(self, command: str) -> None:
+        if not self.process or not self.process.stdin:
+            return
+        try:
+            self.process.stdin.write(command + "\n")
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            pass
+
+    def _extract_mac(self, line: str):
+        lower_line = line.lower()
+        for mac, original in self.targets.items():
+            if mac in lower_line:
+                return original
+        match = self.mac_regex.search(lower_line)
+        if not match:
+            return None
+        mac = match.group(1).upper()
+        return self.targets.get(mac.lower())
+
+    def _stop_process(self):
+        if not self.process:
+            return
+        try:
+            self._send_command("scan off")
+            self._send_command("quit")
+        except Exception:
+            pass
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=2)
+        except Exception:
+            try:
+                self.process.kill()
+            except Exception:
+                pass
+        self.process = None
+
+
+bluetooth_scanner = BluetoothScanner(macaddresses, state_lock)
+atexit.register(bluetooth_scanner.stop)
+
+
 def probe_device(mac: str) -> bool:
     logging.debug("Starte Probe für %s", mac)
     try:
         res = subprocess.run(
-            ["hcitool", "name", mac],
+            ["timeout", str(bluetooth_probe_timeout), "bluetoothctl", "info", mac],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             check=False,
-            timeout=bluetooth_probe_timeout,
-            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        logging.debug("hcitool Timeout für %s", mac)
-        return False
-    except FileNotFoundError:
-        logging.error("Befehl hcitool nicht gefunden. Prüfe bluez Installation.")
+    except FileNotFoundError as exc:
+        missing = exc.filename or "timeout/bluetoothctl"
+        logging.error("Befehl %s nicht gefunden. Prüfe bluez/coreutils Installation.", missing)
         return False
     except Exception as exc:  # pragma: no cover
-        logging.error("Fehler bei hcitool name %s: %s", mac, exc)
+        logging.error("Fehler bei bluetoothctl info %s: %s", mac, exc)
         return False
 
     if res.stderr:
-        logging.debug("hcitool stderr (%s): %s", mac, res.stderr.strip())
-    return bool(res.stdout.strip())
+        logging.debug("bluetoothctl stderr (%s): %s", mac, res.stderr.strip())
+    if res.returncode == 124:
+        logging.debug("bluetoothctl Timeout für %s", mac)
+        return False
+    return "Device" in res.stdout or "Name:" in res.stdout
 
 
 def beep(times: int, duration: float) -> None:
@@ -134,45 +234,59 @@ def presence_monitor() -> None:
         logging.debug("Presence-Zyklus gestartet (now=%.3f)", now)
         current_states = {}
         present_macs = []
+        last_seen_updates = {}
+        next_probe_updates = {}
+
+        with state_lock:
+            last_seen_snapshot = {mac: device_last_seen.get(mac, 0.0) for mac in macaddresses}
+            next_probe_snapshot = {mac: device_next_probe.get(mac, 0.0) for mac in macaddresses}
 
         for mac in macaddresses:
-            if now < device_next_probe[mac]:
-                seen_recently = (now - device_last_seen[mac]) <= presence_grace_period
-                current_states[mac] = seen_recently
-                if seen_recently:
-                    present_macs.append(mac)
+            last_seen = last_seen_snapshot.get(mac, 0.0)
+            next_allowed_probe = next_probe_snapshot.get(mac, 0.0)
+            seen_recently = (now - last_seen) <= presence_grace_period
+
+            if seen_recently:
+                current_states[mac] = True
+                present_macs.append(mac)
+                next_probe_updates[mac] = now + present_reprobe_interval
                 logging.debug(
-                    "Überspringe Probe für %s (next_probe=%.3f, last_seen=%.3f, seen_recently=%s)",
+                    "Markiere %s als präsent (last_seen=%.3f, next_probe=%.3f)",
                     mac,
-                    device_next_probe[mac],
-                    device_last_seen[mac],
-                    seen_recently,
+                    last_seen,
+                    next_probe_updates[mac],
+                )
+                continue
+
+            if now < next_allowed_probe:
+                current_states[mac] = False
+                next_probe_updates[mac] = next_allowed_probe
+                logging.debug(
+                    "Überspringe Probe für %s (next_probe=%.3f, last_seen=%.3f)",
+                    mac,
+                    next_allowed_probe,
+                    last_seen,
                 )
                 continue
 
             is_present = probe_device(mac)
             if is_present:
-                device_last_seen[mac] = now
-                device_next_probe[mac] = now + present_reprobe_interval
                 current_states[mac] = True
                 present_macs.append(mac)
+                last_seen_updates[mac] = now
+                next_probe_updates[mac] = now + present_reprobe_interval
                 logging.debug(
                     "Probe erfolgreich für %s (next_probe=%.3f)",
                     mac,
-                    device_next_probe[mac],
+                    next_probe_updates[mac],
                 )
             else:
-                device_next_probe[mac] = now + absent_retry_interval
-                seen_recently = (now - device_last_seen[mac]) <= presence_grace_period
-                current_states[mac] = seen_recently
-                if seen_recently:
-                    present_macs.append(mac)
+                current_states[mac] = False
+                next_probe_updates[mac] = now + absent_retry_interval
                 logging.debug(
-                    "Probe fehlgeschlagen für %s (next_probe=%.3f, last_seen=%.3f, seen_recently=%s)",
+                    "Probe fehlgeschlagen für %s (nächster Versuch=%.3f)",
                     mac,
-                    device_next_probe[mac],
-                    device_last_seen[mac],
-                    seen_recently,
+                    next_probe_updates[mac],
                 )
             time.sleep(probe_pause)
 
@@ -180,6 +294,12 @@ def presence_monitor() -> None:
             device_states.update(current_states)
             devicepresent = bool(present_macs)
             current_presence = devicepresent
+            for mac, ts in last_seen_updates.items():
+                device_last_seen[mac] = ts
+            for mac in macaddresses:
+                device_next_probe[mac] = next_probe_updates.get(
+                    mac, device_next_probe.get(mac, now + absent_retry_interval)
+                )
 
         logging.info(
             "Scan abgeschlossen → anwesend: %s",
@@ -231,6 +351,7 @@ button.when_pressed = button_pressed
 
 
 def start_threads() -> None:
+    bluetooth_scanner.start()
     threading.Thread(target=presence_monitor, daemon=True).start()
     threading.Thread(target=blink_led, daemon=True).start()
 
