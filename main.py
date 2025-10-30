@@ -155,6 +155,7 @@ def log_hcitool_processes() -> None:
         return
 
     total = 0
+    running = 0
     zombies = 0
     lines = res.stdout.strip().splitlines()
     for line in lines[1:]:
@@ -162,16 +163,21 @@ def log_hcitool_processes() -> None:
             continue
         total += 1
         parts = line.split()
-        if len(parts) >= 2 and "Z" in parts[1]:
+        if len(parts) >= 2:
+            stat = parts[1]
+        else:
+            stat = ""
+        if "Z" in stat:
             zombies += 1
+        elif stat.startswith("R") or stat.startswith("D"):
+            running += 1
+
     if total:
-        logging.debug(
-            "hcitool Prozesse aktiv: %d (Zombies: %d)",
-            total,
-            zombies,
-        )
-        if zombies:
-            logging.warning("Es befinden sich %d hcitool Zombies im System.", zombies)
+        msg = f"hcitool Prozesse aktiv: {total} (running: {running}, zombies: {zombies})"
+        if zombies or running > 1:
+            logging.warning("%s", msg)
+        else:
+            logging.debug("%s", msg)
 
 def beep(times: int, duration: float) -> None:
     for _ in range(times):
