@@ -21,6 +21,14 @@ except ImportError:
         def blink(self, *_, **__):
             pass
 
+        @property
+        def value(self):
+            return float(self.state)
+
+        @property
+        def is_pressed(self):
+            return bool(self.state)
+
     Button = LED = OutputDevice = _DummyGPIO
 
 
@@ -34,7 +42,7 @@ macaddresses = [
     "80:04:5F:A2:66:57",
 ]
 
-scaninterval = 15
+scaninterval = 20
 relayclosetime = 0.5
 presencebeepduration = 0.1
 presencebeepcount = 2
@@ -47,7 +55,7 @@ active_probe_schedule = [
     (1.6, 1, 0.4),
 ]
 max_absent_failures = 2
-inter_device_pause = 0.4
+inter_device_pause = 3.0
 
 
 logging.basicConfig(
@@ -129,6 +137,41 @@ def active_probe(mac: str) -> bool:
     logging.debug("Aktive Probe endgültig fehlgeschlagen für %s", mac)
     return False
 
+
+def log_hcitool_processes() -> None:
+    try:
+        res = subprocess.run(
+            ["ps", "-eo", "pid,stat,comm"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError:
+        logging.debug("ps Befehl nicht verfügbar – Prozessdiagnose übersprungen.")
+        return
+    except Exception as exc:
+        logging.debug("Prozessdiagnose fehlgeschlagen: %s", exc)
+        return
+
+    total = 0
+    zombies = 0
+    lines = res.stdout.strip().splitlines()
+    for line in lines[1:]:
+        if "hcitool" not in line:
+            continue
+        total += 1
+        parts = line.split()
+        if len(parts) >= 2 and "Z" in parts[1]:
+            zombies += 1
+    if total:
+        logging.debug(
+            "hcitool Prozesse aktiv: %d (Zombies: %d)",
+            total,
+            zombies,
+        )
+        if zombies:
+            logging.warning("Es befinden sich %d hcitool Zombies im System.", zombies)
 
 def beep(times: int, duration: float) -> None:
     for _ in range(times):
@@ -255,6 +298,8 @@ def presence_monitor() -> None:
             "Scan abgeschlossen → anwesend: %s",
             ", ".join(present_macs) if present_macs else "keine Geräte",
         )
+
+        log_hcitool_processes()
 
         if current_presence != previous_presence:
             if current_presence:
