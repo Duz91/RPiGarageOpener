@@ -3,6 +3,8 @@ import logging
 import subprocess
 import threading
 import time
+import os
+import resource
 
 try:
     from gpiozero import Button, LED, OutputDevice
@@ -179,6 +181,24 @@ def log_hcitool_processes() -> None:
         else:
             logging.debug("%s", msg)
 
+
+def log_system_stats() -> None:
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except (OSError, AttributeError):
+        load1 = load5 = load15 = 0.0
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_mb = usage.ru_maxrss / 1024.0
+    logging.debug(
+        "Systemstats: load=%.2f/%.2f/%.2f, cpu_utime=%.2fs, rss=%.1fMB, threads=%d",
+        load1,
+        load5,
+        load15,
+        usage.ru_utime,
+        rss_mb,
+        len(threading.enumerate()),
+    )
+
 def beep(times: int, duration: float) -> None:
     for _ in range(times):
         buzzer.on()
@@ -306,6 +326,7 @@ def presence_monitor() -> None:
         )
 
         log_hcitool_processes()
+        log_system_stats()
 
         if current_presence != previous_presence:
             if current_presence:
