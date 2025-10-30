@@ -182,21 +182,33 @@ def log_hcitool_processes() -> None:
             logging.debug("%s", msg)
 
 
-def log_system_stats() -> None:
+def collect_system_stats() -> dict:
     try:
         load1, load5, load15 = os.getloadavg()
     except (OSError, AttributeError):
         load1 = load5 = load15 = 0.0
     usage = resource.getrusage(resource.RUSAGE_SELF)
     rss_mb = usage.ru_maxrss / 1024.0
+    return {
+        "load1": load1,
+        "load5": load5,
+        "load15": load15,
+        "cpu_utime": usage.ru_utime,
+        "rss_mb": rss_mb,
+        "threads": len(threading.enumerate()),
+    }
+
+
+def log_system_stats() -> None:
+    stats = collect_system_stats()
     logging.debug(
         "Systemstats: load=%.2f/%.2f/%.2f, cpu_utime=%.2fs, rss=%.1fMB, threads=%d",
-        load1,
-        load5,
-        load15,
-        usage.ru_utime,
-        rss_mb,
-        len(threading.enumerate()),
+        stats["load1"],
+        stats["load5"],
+        stats["load15"],
+        stats["cpu_utime"],
+        stats["rss_mb"],
+        stats["threads"],
     )
 
 def beep(times: int, duration: float) -> None:
@@ -392,6 +404,7 @@ def status():
             "devices": devices,
             "any_present": devicepresent,
             "current_probe": current_probe_target,
+            "system": collect_system_stats(),
             "gpio": gpio,
             "timestamp": now,
         }

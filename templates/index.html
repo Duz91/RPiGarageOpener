@@ -57,12 +57,79 @@
             font-size: 1rem;
             color: #333;
         }
+        .system-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 16px;
+            margin: 20px auto;
+            width: 80%;
+        }
+        .system-card {
+            flex: 1 1 220px;
+            background: #fff;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            padding: 16px 20px;
+            text-align: left;
+            min-width: 200px;
+        }
+        .card-title {
+            font-size: 0.95rem;
+            color: #666;
+            margin-bottom: 6px;
+        }
+        .card-value {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .progress {
+            height: 8px;
+            background: #e6e9ef;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .progress span {
+            display: block;
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, #4caf50, #81c784);
+            transition: width 0.6s ease;
+        }
+        .system-note {
+            font-size: 0.85rem;
+            color: #777;
+        }
     </style>
 </head>
 <body>
     <h1>Bluetooth-Geräte Überwachung</h1>
     <div class="summary">
         Aktives Gerät: <span id="activeDevice">–</span>
+    </div>
+
+    <div class="system-grid">
+        <div class="system-card">
+            <div class="card-title">CPU Load (1 / 5 / 15)</div>
+            <div class="card-value" id="loadDisplay">–</div>
+            <div class="progress"><span id="loadBar"></span></div>
+        </div>
+        <div class="system-card">
+            <div class="card-title">Prozesszeit</div>
+            <div class="card-value" id="cpuDisplay">–</div>
+            <div class="system-note">kumulierte CPU-Zeit des Dienstes</div>
+        </div>
+        <div class="system-card">
+            <div class="card-title">Speicherverbrauch</div>
+            <div class="card-value" id="memDisplay">–</div>
+            <div class="progress"><span id="memBar"></span></div>
+        </div>
+        <div class="system-card">
+            <div class="card-title">Threads</div>
+            <div class="card-value" id="threadDisplay">–</div>
+            <div class="system-note">aktive Python-Threads</div>
+        </div>
     </div>
 
     <table id="deviceTable">
@@ -129,6 +196,24 @@
             }
         }
 
+        function updateSystemCards(system) {
+            if (!system) {
+                return;
+            }
+            const loadText = `${system.load1.toFixed(2)} / ${system.load5.toFixed(2)} / ${system.load15.toFixed(2)}`;
+            document.getElementById('loadDisplay').innerText = loadText;
+            const loadPct = Math.max(0, Math.min(100, (system.load1 / 2) * 100));
+            document.getElementById('loadBar').style.width = loadPct + '%';
+
+            document.getElementById('cpuDisplay').innerText = `${system.cpu_utime.toFixed(2)} s`;
+
+            document.getElementById('memDisplay').innerText = `${system.rss_mb.toFixed(1)} MB`;
+            const memPct = Math.max(0, Math.min(100, (system.rss_mb / 64) * 100));
+            document.getElementById('memBar').style.width = memPct + '%';
+
+            document.getElementById('threadDisplay').innerText = system.threads;
+        }
+
         async function fetchStatus() {
             try {
                 const res = await fetch('/status');
@@ -137,6 +222,7 @@
                 document.getElementById("lastUpdate").innerText = now;
 
                 document.getElementById("activeDevice").innerText = data.current_probe || '–';
+                updateSystemCards(data.system);
 
                 for (const [mac, info] of Object.entries(data.devices)) {
                     const key = mac.replace(/:/g, "");
