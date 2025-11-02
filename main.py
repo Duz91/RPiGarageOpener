@@ -42,6 +42,8 @@ BUZZERPIN = 19
 macaddresses = [
     "0C:15:63:DF:61:2F",
     "80:04:5F:A2:66:57",
+    "58:73:D8:CA:D3:F4",
+    "58:AD:12:A0:7F:36",
 ]
 
 scaninterval = 20
