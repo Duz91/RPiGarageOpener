@@ -43,14 +43,14 @@ macaddresses = [
     "0C:15:63:DF:61:2F",
     "80:04:5F:A2:66:57",
     "58:73:D8:CA:D3:F4",
-    "58:AD:12:A0:7F:36",
+    #"58:AD:12:A0:7F:36",
 ]
 
 mac_labels = {
     "0C:15:63:DF:61:2F": "Mercedes iPhone",
     "80:04:5F:A2:66:57": "iPhoneSE",
     "58:73:D8:CA:D3:F4": "Apple Watch Ultra",
-    "58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
+    #"58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
 }
 
 scaninterval = 20
