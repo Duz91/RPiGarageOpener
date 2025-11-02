@@ -338,8 +338,6 @@ def presence_monitor() -> None:
         )
 
         log_hcitool_processes()
-        log_system_stats()
-
         if current_presence != previous_presence:
             if current_presence:
                 beep(presencebeepcount, presencebeepduration)

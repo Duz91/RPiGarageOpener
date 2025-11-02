@@ -116,11 +116,6 @@
             <div class="progress"><span id="loadBar"></span></div>
         </div>
         <div class="system-card">
-            <div class="card-title">Prozesszeit</div>
-            <div class="card-value" id="cpuDisplay">–</div>
-            <div class="system-note">kumulierte CPU-Zeit des Dienstes</div>
-        </div>
-        <div class="system-card">
             <div class="card-title">Speicherverbrauch</div>
             <div class="card-value" id="memDisplay">–</div>
             <div class="progress"><span id="memBar"></span></div>
@@ -204,8 +199,6 @@
             document.getElementById('loadDisplay').innerText = loadText;
             const loadPct = Math.max(0, Math.min(100, (system.load1 / 2) * 100));
             document.getElementById('loadBar').style.width = loadPct + '%';
-
-            document.getElementById('cpuDisplay').innerText = `${system.cpu_utime.toFixed(2)} s`;
 
             document.getElementById('memDisplay').innerText = `${system.rss_mb.toFixed(1)} MB`;
             const memPct = Math.max(0, Math.min(100, (system.rss_mb / 64) * 100));
