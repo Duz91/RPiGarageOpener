@@ -130,6 +130,7 @@
     <table id="deviceTable">
         <thead>
             <tr>
+                <th>Gerätename</th>
                 <th>MAC-Adresse</th>
                 <th>Status</th>
                 <th>Letztes Ergebnis</th>
@@ -141,6 +142,7 @@
         <tbody>
             {% for mac in macaddresses %}
             <tr id="row-{{ mac|replace(':', '') }}">
+                <td>{{ mac_labels.get(mac, "–") }}</td>
                 <td>{{ mac }}</td>
                 <td id="status-{{ mac|replace(':', '') }}">⏳ Überprüfe...</td>
                 <td id="result-{{ mac|replace(':', '') }}">–</td>

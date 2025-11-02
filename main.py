@@ -46,6 +46,13 @@ macaddresses = [
     "58:AD:12:A0:7F:36",
 ]
 
+mac_labels = {
+    "0C:15:63:DF:61:2F": "Mercedes iPhone",
+    "80:04:5F:A2:66:57": "iPhoneSE",
+    "58:73:D8:CA:D3:F4": "Apple Watch Ultra",
+    "58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
+}
+
 scaninterval = 20
 relayclosetime = 0.5
 presencebeepduration = 0.1
@@ -363,7 +370,7 @@ def presence_monitor() -> None:
 
 @app.route("/")
 def index():
-    return render_template("index.html", macaddresses=macaddresses)
+    return render_template("index.html", macaddresses=macaddresses, mac_labels=mac_labels)
 
 
 @app.route("/status")
