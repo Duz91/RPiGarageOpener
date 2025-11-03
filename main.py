@@ -43,14 +43,14 @@ macaddresses = [
     "0C:15:63:DF:61:2F",
     "80:04:5F:A2:66:57",
     "58:73:D8:CA:D3:F4",
-    #"58:AD:12:A0:7F:36",
+    "58:AD:12:A0:7F:36",
 ]
 
 mac_labels = {
     "0C:15:63:DF:61:2F": "Mercedes iPhone",
     "80:04:5F:A2:66:57": "iPhoneSE",
     "58:73:D8:CA:D3:F4": "Apple Watch Ultra",
-    #"58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
+    "58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
 }
 
 scaninterval = 20
@@ -63,7 +63,7 @@ buttonbouncetime = 0.2
 presenceledblinkinterval = 0.7
 absenceledblinkinterval = 1.2
 active_probe_schedule = [
-    (1.2, 1, 0.8),
+    (1.4, 1, 0.8),
 ]
 max_absent_failures = 3
 inter_device_pause = 3.0
