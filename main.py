@@ -53,7 +53,7 @@ mac_labels = {
     "58:AD:12:A0:7F:36": "iPhone 14 Pro Max",
 }
 
-scaninterval = 20
+scaninterval = 15
 relayclosetime = 0.5
 presencebeepduration = 0.1
 presencebeepcount = 2
@@ -65,8 +65,8 @@ absenceledblinkinterval = 1.2
 active_probe_schedule = [
     (1.4, 1, 0.8),
 ]
-max_absent_failures = 3
-inter_device_pause = 3.0
+max_absent_failures = 2
+inter_device_pause = 2.7
 
 
 logging.basicConfig(
